@@ -234,7 +234,7 @@ async def handle_inbound_call(request: Request):
     # Play ÎNAINTE de Gather → robotul vorbește complet, fără barge-in
     response.play(url_salut)
     gather = Gather(input="speech", action="/voice/process", method="POST",
-                    timeout=15, speech_timeout="3", language=LANGUAGE)
+                    timeout=8, speech_timeout="2", language=LANGUAGE)
     response.append(gather)
     response.play(url_timeout)
     response.hangup()
@@ -261,7 +261,7 @@ async def process_speech(request: Request):
         url = await tts("Îmi pare rău, nu am reușit să vă înțeleg. Vă rog să repetați.")
         response.play(url)
         gather = Gather(input="speech", action="/voice/process", method="POST",
-                        timeout=15, speech_timeout="3", language=LANGUAGE)
+                        timeout=8, speech_timeout="2", language=LANGUAGE)
         response.append(gather)
         return Response(content=str(response), media_type="application/xml")
 
@@ -286,7 +286,7 @@ async def process_speech(request: Request):
 
     response.play(url_confirmare)
     gather = Gather(input="speech", action="/voice/confirm", method="POST",
-                    timeout=15, speech_timeout="3", language=LANGUAGE)
+                    timeout=8, speech_timeout="2", language=LANGUAGE)
     response.append(gather)
     response.play(url_timeout)
     response.hangup()
@@ -322,7 +322,7 @@ async def handle_confirmation(request: Request):
             url = await tts("Îmi pare rău, nu am ce repeta.")
             response.play(url)
         gather = Gather(input="speech", action="/voice/confirm", method="POST",
-                        timeout=15, speech_timeout="3", language=LANGUAGE)
+                        timeout=8, speech_timeout="2", language=LANGUAGE)
         response.append(gather)
     elif cuvinte & cuvinte_da:
         logger.info(f"[{call_sid}] CONFIRMAT")
