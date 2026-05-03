@@ -89,7 +89,7 @@ async def test_page():
 
     <div id="status">Se inițializează...</div>
 
-    <script src="https://media.twiliocdn.com/sdk/js/voice/releases/2.11.0/twilio.min.js"></script>
+    <script src="https://unpkg.com/@twilio/voice-sdk@2.11.0/dist/twilio.min.js"></script>
     <script>
         let device;
         let activeCall;
