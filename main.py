@@ -7,7 +7,6 @@ Suportă atât apeluri telefonice cât și apeluri din browser (Voice SDK)
 import os
 import io
 import uuid
-import asyncio
 import logging
 from collections import deque
 from datetime import datetime
@@ -17,7 +16,7 @@ from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.jwt.access_token import AccessToken
 from twilio.jwt.access_token.grants import VoiceGrant
 from openai import AsyncOpenAI
-from gtts import gTTS
+import edge_tts
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -57,17 +56,13 @@ def log_entry(tip: str, text: str, call_sid: str = ""):
 
 
 async def tts(text: str) -> str:
-    """Generează audio cu gTTS și returnează URL-ul de accesat."""
     audio_id = str(uuid.uuid4())
-    loop = asyncio.get_event_loop()
-
-    def generate():
-        tts_obj = gTTS(text=text, lang="ro")
-        buf = io.BytesIO()
-        tts_obj.write_to_fp(buf)
-        return buf.getvalue()
-
-    audio_cache[audio_id] = await loop.run_in_executor(None, generate)
+    communicate = edge_tts.Communicate(text, voice="ro-RO-AlinaNeural")
+    buf = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    audio_cache[audio_id] = buf.getvalue()
     return f"{BASE_URL}/audio/{audio_id}"
 
 
