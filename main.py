@@ -34,16 +34,16 @@ openai_client = AsyncOpenAI()
 LANGUAGE = "ro-RO"
 BASE_URL = os.getenv("BASE_URL", "https://rezervari-ai.onrender.com")
 
-ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
-API_KEY_SID     = os.getenv("TWILIO_API_KEY_SID")
-API_KEY_SECRET  = os.getenv("TWILIO_API_KEY_SECRET")
-TWIML_APP_SID   = os.getenv("TWILIO_TWIML_APP_SID")
+ACCOUNT_SID    = os.getenv("TWILIO_ACCOUNT_SID")
+API_KEY_SID    = os.getenv("TWILIO_API_KEY_SID")
+API_KEY_SECRET = os.getenv("TWILIO_API_KEY_SECRET")
+TWIML_APP_SID  = os.getenv("TWILIO_TWIML_APP_SID")
 
-# Cache audio în memorie
 audio_cache: dict = {}
-
-# Jurnal conversații
 conversation_log: deque = deque(maxlen=50)
+
+# Stochează ultimul mesaj AI per apel pentru funcția de repetare
+call_state: dict = {}
 
 
 def log_entry(tip: str, text: str, call_sid: str = ""):
@@ -67,7 +67,7 @@ async def tts(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# AUDIO — servim fișierele MP3 generate
+# AUDIO
 # ---------------------------------------------------------------------------
 
 @app.get("/audio/{audio_id}")
@@ -84,18 +84,8 @@ async def serve_audio(audio_id: str):
 
 @app.get("/token")
 async def get_token():
-    token = AccessToken(
-        ACCOUNT_SID,
-        API_KEY_SID,
-        API_KEY_SECRET,
-        identity="browser-user",
-        ttl=3600
-    )
-    voice_grant = VoiceGrant(
-        outgoing_application_sid=TWIML_APP_SID,
-        incoming_allow=True
-    )
-    token.add_grant(voice_grant)
+    token = AccessToken(ACCOUNT_SID, API_KEY_SID, API_KEY_SECRET, identity="browser-user", ttl=3600)
+    token.add_grant(VoiceGrant(outgoing_application_sid=TWIML_APP_SID, incoming_allow=True))
     jwt = token.to_jwt()
     if isinstance(jwt, bytes):
         jwt = jwt.decode("utf-8")
@@ -144,17 +134,13 @@ async def test_page():
 <body>
     <h1>🎙️ Sistem Rezervări AI</h1>
     <p>Apasă butonul și vorbește cu AI-ul de rezervări</p>
-
     <button id="btn-call" onclick="startCall()">📞 Sună</button>
     <button id="btn-hangup" onclick="hangup()">📵 Închide</button>
-
     <div id="status">Se inițializează...</div>
-
     <div id="jurnal">
         <h3>📋 Jurnal conversație</h3>
         <ul id="log-list"></ul>
     </div>
-
     <script src="https://unpkg.com/@twilio/voice-sdk@2.11.0/dist/twilio.min.js"></script>
     <script>
         let device, activeCall, lastLogCount = 0;
@@ -184,6 +170,8 @@ async def test_page():
                     document.getElementById('btn-call').style.display = 'inline-block';
                     document.getElementById('btn-hangup').style.display = 'none';
                     activeCall = null;
+                    lastLogCount = 0;
+                    document.getElementById('log-list').innerHTML = '';
                 });
                 activeCall.on('error', (err) => setStatus('Eroare apel: ' + err.message));
             } catch(e) { setStatus('Eroare: ' + e.message); }
@@ -222,7 +210,7 @@ async def test_page():
 
 
 # ---------------------------------------------------------------------------
-# PASUL 1: Răspundem la apel
+# PASUL 1: Răspundem la apel — curățăm jurnalul la fiecare apel nou
 # ---------------------------------------------------------------------------
 
 @app.post("/voice/inbound")
@@ -231,18 +219,24 @@ async def handle_inbound_call(request: Request):
     call_sid = form.get("CallSid", "necunoscut")
     logger.info(f"[{call_sid}] Apel primit")
 
-    url = await tts(
+    # Curățăm jurnalul și starea apelului anterior
+    conversation_log.clear()
+    call_state.pop(call_sid, None)
+
+    url_salut   = await tts(
         "Bună ziua! Ați sunat la sistemul nostru de rezervări. "
         "Vă rog să îmi spuneți ce doriți să rezervați, "
         "incluzând data, ora și numărul de persoane."
     )
-    url_fallback = await tts("Nu am detectat niciun răspuns. Vă rugăm să sunați din nou. La revedere!")
+    url_timeout = await tts("Nu am detectat niciun răspuns. Vă rugăm să sunați din nou. La revedere!")
 
     response = VoiceResponse()
-    gather = Gather(input="speech", action="/voice/process", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
-    gather.play(url)
+    # Play ÎNAINTE de Gather → robotul vorbește complet, fără barge-in
+    response.play(url_salut)
+    gather = Gather(input="speech", action="/voice/process", method="POST",
+                    timeout=15, speech_timeout="3", language=LANGUAGE)
     response.append(gather)
-    response.play(url_fallback)
+    response.play(url_timeout)
     response.hangup()
 
     return Response(content=str(response), media_type="application/xml")
@@ -265,8 +259,9 @@ async def process_speech(request: Request):
 
     if not speech_result:
         url = await tts("Îmi pare rău, nu am reușit să vă înțeleg. Vă rog să repetați.")
-        gather = Gather(input="speech", action="/voice/process", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
-        gather.play(url)
+        response.play(url)
+        gather = Gather(input="speech", action="/voice/process", method="POST",
+                        timeout=15, speech_timeout="3", language=LANGUAGE)
         response.append(gather)
         return Response(content=str(response), media_type="application/xml")
 
@@ -283,11 +278,15 @@ async def process_speech(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-    url_confirmare = await tts(f"{mesaj_confirmare} Este corect? Spuneți DA sau NU.")
+    url_confirmare = await tts(f"{mesaj_confirmare} Este corect? Spuneți DA sau NU. Dacă nu ați auzit bine, spuneți REPETĂ.")
     url_timeout    = await tts("Nu am primit un răspuns. Vă mulțumim! La revedere!")
 
-    gather = Gather(input="speech", action="/voice/confirm", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
-    gather.play(url_confirmare)
+    # Salvăm ultimul mesaj pentru repetare
+    call_state[call_sid] = {"url": url_confirmare, "text": mesaj_confirmare}
+
+    response.play(url_confirmare)
+    gather = Gather(input="speech", action="/voice/confirm", method="POST",
+                    timeout=15, speech_timeout="3", language=LANGUAGE)
     response.append(gather)
     response.play(url_timeout)
     response.hangup()
@@ -296,7 +295,7 @@ async def process_speech(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# PASUL 3: Confirmarea DA / NU
+# PASUL 3: Confirmarea DA / NU / REPETĂ
 # ---------------------------------------------------------------------------
 
 @app.post("/voice/confirm")
@@ -309,24 +308,36 @@ async def handle_confirmation(request: Request):
     log_entry("confirmare", speech_result, call_sid)
 
     response = VoiceResponse()
-    cuvinte_da = {"da", "corect", "exact", "bine", "perfect", "confirmat"}
-    cuvinte_nu = {"nu", "gresit", "incorect", "negativ"}
-    cuvinte_din_raspuns = set(speech_result.split())
+    cuvinte     = set(speech_result.split())
+    cuvinte_da  = {"da", "corect", "exact", "bine", "perfect", "confirmat"}
+    cuvinte_nu  = {"nu", "gresit", "incorect", "negativ"}
+    cuvinte_rep = {"repeta", "repetă", "repetati", "repetați", "auzit", "inteles", "înțeles", "spune", "nou"}
 
-    if cuvinte_din_raspuns & cuvinte_da:
-        logger.info(f"[{call_sid}] TEST REUSIT")
-        url = await tts("Excelent! Sistemul funcționează corect. Vă mulțumim! La revedere!")
-    elif cuvinte_din_raspuns & cuvinte_nu:
+    if cuvinte & cuvinte_rep:
+        # Repetăm ultimul mesaj AI
+        last = call_state.get(call_sid)
+        if last:
+            response.play(last["url"])
+        else:
+            url = await tts("Îmi pare rău, nu am ce repeta.")
+            response.play(url)
+        gather = Gather(input="speech", action="/voice/confirm", method="POST",
+                        timeout=15, speech_timeout="3", language=LANGUAGE)
+        response.append(gather)
+    elif cuvinte & cuvinte_da:
+        logger.info(f"[{call_sid}] CONFIRMAT")
+        url = await tts("Excelent! Rezervarea a fost confirmată. Vă mulțumim! La revedere!")
+        response.play(url)
+        response.hangup()
+    elif cuvinte & cuvinte_nu:
         url = await tts("Înțeleg, mă scuz. Să reluăm.")
         response.play(url)
         response.redirect("/voice/inbound", method="POST")
-        response.hangup()
-        return Response(content=str(response), media_type="application/xml")
     else:
         url = await tts("Vă mulțumim pentru apel. La revedere!")
+        response.play(url)
+        response.hangup()
 
-    response.play(url)
-    response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
 
