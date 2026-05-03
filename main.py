@@ -1,7 +1,6 @@
 """
-Sistem de Rezervări Telefonice Bazat pe AI - Prototip
-Flux: Ascultă → Transcrie (Twilio STT) → Procesează (GPT) → Repetă vocal
-Suportă atât apeluri telefonice cât și apeluri din browser (Voice SDK)
+Sistem de Rezervări Telefonice Bazat pe AI
+Flux: Ascultă → Transcrie → GPT gestionează conversația → Răspunde vocal
 """
 
 import os
@@ -21,42 +20,54 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Sistem Rezervări AI", version="1.0.0")
-
+app = FastAPI(title="Sistem Rezervări AI", version="2.0.0")
 openai_client = AsyncOpenAI()
 
 LANGUAGE = "ro-RO"
-BASE_URL = os.getenv("BASE_URL", "https://rezervari-ai.onrender.com")
+BASE_URL  = os.getenv("BASE_URL", "https://rezervari-ai.onrender.com")
 
 ACCOUNT_SID    = os.getenv("TWILIO_ACCOUNT_SID")
 API_KEY_SID    = os.getenv("TWILIO_API_KEY_SID")
 API_KEY_SECRET = os.getenv("TWILIO_API_KEY_SECRET")
 TWIML_APP_SID  = os.getenv("TWILIO_TWIML_APP_SID")
 
-audio_cache: dict = {}
+audio_cache:    dict  = {}
+conversations:  dict  = {}  # call_sid -> istoric mesaje GPT
 conversation_log: deque = deque(maxlen=50)
 
-# Stochează ultimul mesaj AI per apel pentru funcția de repetare
-call_state: dict = {}
+SYSTEM_PROMPT = """Ești un asistent vocal de rezervări. Tu gestionezi întreaga conversație cu clientul.
+
+Obiectivele tale:
+1. Află tipul rezervării (masă, cameră, etc.), data, ora și numărul de persoane
+2. Confirmă detaliile cu clientul
+3. Dacă clientul confirmă, mulțumește-le și adaugă exact [INCHEIAT] la finalul mesajului
+4. Dacă clientul nu a înțeles sau cere să repeți, repetă ultima ta replică
+5. Dacă detaliile sunt greșite, cere-le să reformuleze
+
+Reguli stricte:
+- Răspunde EXCLUSIV în română, natural, maxim 2 propoziții
+- Scrie DOAR ceea ce spui clientului, fără explicații sau comentarii
+- Când conversația s-a terminat (confirmat sau renunțat), adaugă [INCHEIAT] la final"""
+
+SALUT = (
+    "Bună ziua! Ați sunat la sistemul nostru de rezervări. "
+    "Vă rog să îmi spuneți ce doriți să rezervați, "
+    "incluzând data, ora și numărul de persoane."
+)
 
 
 def log_entry(tip: str, text: str, call_sid: str = ""):
     conversation_log.append({
         "timp": datetime.now().strftime("%H:%M:%S"),
-        "tip": tip,
-        "text": text,
-        "call_sid": call_sid,
+        "tip": tip, "text": text, "call_sid": call_sid,
     })
 
 
 async def tts(text: str) -> str:
-    audio_id = str(uuid.uuid4())
+    audio_id  = str(uuid.uuid4())
     communicate = edge_tts.Communicate(text, voice="ro-RO-AlinaNeural")
     buf = io.BytesIO()
     async for chunk in communicate.stream():
@@ -64,6 +75,25 @@ async def tts(text: str) -> str:
             buf.write(chunk["data"])
     audio_cache[audio_id] = buf.getvalue()
     return f"{BASE_URL}/audio/{audio_id}"
+
+
+async def raspuns_gpt(call_sid: str, mesaj_user: str) -> tuple[str, bool]:
+    """Trimite mesajul la GPT și returnează (răspuns, conversație_încheiată)."""
+    conversations[call_sid].append({"role": "user", "content": mesaj_user})
+
+    completion = await openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + conversations[call_sid],
+        max_tokens=150,
+        temperature=0.3,
+    )
+
+    raspuns_brut = completion.choices[0].message.content.strip()
+    incheiat     = "[INCHEIAT]" in raspuns_brut
+    raspuns      = raspuns_brut.replace("[INCHEIAT]", "").strip()
+
+    conversations[call_sid].append({"role": "assistant", "content": raspuns})
+    return raspuns, incheiat
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +156,6 @@ async def test_page():
         #log-list li { padding: 10px 14px; margin-bottom: 8px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
         .tip-user { background: #e3f2fd; border-left: 4px solid #2196F3; }
         .tip-ai { background: #e8f5e9; border-left: 4px solid #4CAF50; }
-        .tip-confirmare { background: #fff3e0; border-left: 4px solid #FF9800; }
         .timp { font-size: 11px; color: #999; margin-right: 8px; }
         .eticheta { font-weight: bold; margin-right: 6px; }
     </style>
@@ -192,7 +221,6 @@ async def test_page():
                     const li = document.createElement('li');
                     let cls = 'tip-user', label = '🎤 Tu';
                     if (e.tip === 'ai') { cls = 'tip-ai'; label = '🤖 AI'; }
-                    if (e.tip === 'confirmare') { cls = 'tip-confirmare'; label = '✅ Confirmare'; }
                     li.className = cls;
                     li.innerHTML = '<span class="timp">' + e.timp + '</span><span class="eticheta">' + label + ':</span>' + e.text;
                     ul.appendChild(li);
@@ -210,32 +238,27 @@ async def test_page():
 
 
 # ---------------------------------------------------------------------------
-# PASUL 1: Răspundem la apel — curățăm jurnalul la fiecare apel nou
+# PASUL 1: Salut la apel
 # ---------------------------------------------------------------------------
 
 @app.post("/voice/inbound")
 async def handle_inbound_call(request: Request):
-    form = await request.form()
+    form     = await request.form()
     call_sid = form.get("CallSid", "necunoscut")
     logger.info(f"[{call_sid}] Apel primit")
 
-    # Curățăm jurnalul și starea apelului anterior
     conversation_log.clear()
-    call_state.pop(call_sid, None)
+    conversations[call_sid] = []
 
-    url_salut   = await tts(
-        "Bună ziua! Ați sunat la sistemul nostru de rezervări. "
-        "Vă rog să îmi spuneți ce doriți să rezervați, "
-        "incluzând data, ora și numărul de persoane."
-    )
-    url_timeout = await tts("Nu am detectat niciun răspuns. Vă rugăm să sunați din nou. La revedere!")
+    url = await tts(SALUT)
+    log_entry("ai", SALUT, call_sid)
 
     response = VoiceResponse()
-    # Play ÎNAINTE de Gather → robotul vorbește complet, fără barge-in
-    response.play(url_salut)
-    gather = Gather(input="speech", action="/voice/process", method="POST",
+    response.play(url)
+    gather = Gather(input="speech", action="/voice/respond", method="POST",
                     timeout=8, speech_timeout="2", language=LANGUAGE)
     response.append(gather)
+    url_timeout = await tts("Nu am detectat niciun răspuns. Vă rugăm să sunați din nou. La revedere!")
     response.play(url_timeout)
     response.hangup()
 
@@ -243,24 +266,23 @@ async def handle_inbound_call(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# PASUL 2: Procesăm speech-ul prin GPT
+# PASUL 2: GPT gestionează toată conversația
 # ---------------------------------------------------------------------------
 
-@app.post("/voice/process")
-async def process_speech(request: Request):
-    form = await request.form()
+@app.post("/voice/respond")
+async def handle_response(request: Request):
+    form          = await request.form()
     speech_result = form.get("SpeechResult", "").strip()
-    confidence    = float(form.get("Confidence", "0"))
     call_sid      = form.get("CallSid", "necunoscut")
 
-    logger.info(f"[{call_sid}] Transcris: '{speech_result}' | Incredere: {confidence:.2f}")
+    logger.info(f"[{call_sid}] Utilizator: '{speech_result}'")
 
     response = VoiceResponse()
 
     if not speech_result:
-        url = await tts("Îmi pare rău, nu am reușit să vă înțeleg. Vă rog să repetați.")
+        url = await tts("Îmi pare rău, nu am înțeles. Puteți repeta?")
         response.play(url)
-        gather = Gather(input="speech", action="/voice/process", method="POST",
+        gather = Gather(input="speech", action="/voice/respond", method="POST",
                         timeout=8, speech_timeout="2", language=LANGUAGE)
         response.append(gather)
         return Response(content=str(response), media_type="application/xml")
@@ -268,9 +290,9 @@ async def process_speech(request: Request):
     log_entry("user", speech_result, call_sid)
 
     try:
-        mesaj_confirmare = await extrage_detalii_rezervare(speech_result)
-        logger.info(f"[{call_sid}] GPT: '{mesaj_confirmare}'")
-        log_entry("ai", mesaj_confirmare, call_sid)
+        raspuns, incheiat = await raspuns_gpt(call_sid, speech_result)
+        logger.info(f"[{call_sid}] GPT: '{raspuns}' | Încheiat: {incheiat}")
+        log_entry("ai", raspuns, call_sid)
     except Exception as exc:
         logger.error(f"[{call_sid}] Eroare GPT: {exc}")
         url = await tts("Am întâmpinat o problemă tehnică. Vă rog încercați din nou.")
@@ -278,92 +300,20 @@ async def process_speech(request: Request):
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-    url_confirmare = await tts(f"{mesaj_confirmare} Este corect? Spuneți DA sau NU. Dacă nu ați auzit bine, spuneți REPETĂ.")
-    url_timeout    = await tts("Nu am primit un răspuns. Vă mulțumim! La revedere!")
+    url = await tts(raspuns)
+    response.play(url)
 
-    # Salvăm ultimul mesaj pentru repetare
-    call_state[call_sid] = {"url": url_confirmare, "text": mesaj_confirmare}
-
-    response.play(url_confirmare)
-    gather = Gather(input="speech", action="/voice/confirm", method="POST",
-                    timeout=8, speech_timeout="2", language=LANGUAGE)
-    response.append(gather)
-    response.play(url_timeout)
-    response.hangup()
-
-    return Response(content=str(response), media_type="application/xml")
-
-
-# ---------------------------------------------------------------------------
-# PASUL 3: Confirmarea DA / NU / REPETĂ
-# ---------------------------------------------------------------------------
-
-@app.post("/voice/confirm")
-async def handle_confirmation(request: Request):
-    form = await request.form()
-    speech_result = form.get("SpeechResult", "").lower().strip()
-    call_sid      = form.get("CallSid", "necunoscut")
-
-    logger.info(f"[{call_sid}] Confirmare: '{speech_result}'")
-    log_entry("confirmare", speech_result, call_sid)
-
-    response = VoiceResponse()
-    cuvinte     = set(speech_result.split())
-    cuvinte_da  = {"da", "corect", "exact", "bine", "perfect", "confirmat"}
-    cuvinte_nu  = {"nu", "gresit", "incorect", "negativ"}
-    cuvinte_rep = {"repeta", "repetă", "repetati", "repetați", "auzit", "inteles", "înțeles", "spune", "nou"}
-
-    if cuvinte & cuvinte_rep:
-        # Repetăm ultimul mesaj AI
-        last = call_state.get(call_sid)
-        if last:
-            response.play(last["url"])
-        else:
-            url = await tts("Îmi pare rău, nu am ce repeta.")
-            response.play(url)
-        gather = Gather(input="speech", action="/voice/confirm", method="POST",
+    if incheiat:
+        response.hangup()
+    else:
+        gather = Gather(input="speech", action="/voice/respond", method="POST",
                         timeout=8, speech_timeout="2", language=LANGUAGE)
         response.append(gather)
-    elif cuvinte & cuvinte_da:
-        logger.info(f"[{call_sid}] CONFIRMAT")
-        url = await tts("Excelent! Rezervarea a fost confirmată. Vă mulțumim! La revedere!")
-        response.play(url)
-        response.hangup()
-    elif cuvinte & cuvinte_nu:
-        url = await tts("Înțeleg, mă scuz. Să reluăm.")
-        response.play(url)
-        response.redirect("/voice/inbound", method="POST")
-    else:
-        url = await tts("Vă mulțumim pentru apel. La revedere!")
-        response.play(url)
+        url_timeout = await tts("Nu am primit răspuns. La revedere!")
+        response.play(url_timeout)
         response.hangup()
 
     return Response(content=str(response), media_type="application/xml")
-
-
-# ---------------------------------------------------------------------------
-# Funcție auxiliară GPT
-# ---------------------------------------------------------------------------
-
-async def extrage_detalii_rezervare(text_utilizator: str) -> str:
-    completion = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ești un asistent vocal de rezervări. "
-                    "Din mesajul utilizatorului extrage: tipul rezervării, data, ora și numărul de persoane. "
-                    "Formulează UN SINGUR mesaj de confirmare în română, natural și concis, cu diacritice corecte. "
-                    "Răspunde EXCLUSIV cu mesajul de confirmare."
-                ),
-            },
-            {"role": "user", "content": text_utilizator},
-        ],
-        max_tokens=120,
-        temperature=0.2,
-    )
-    return completion.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
