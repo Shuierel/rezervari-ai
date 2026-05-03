@@ -212,6 +212,7 @@ async def test_page():
                     activeCall = null;
                     lastLogCount = 0;
                     document.getElementById('log-list').innerHTML = '';
+                    fetch('/voice/clear', { method: 'POST' });
                 });
                 activeCall.on('error', (err) => setStatus('Eroare apel: ' + err.message));
             } catch(e) { setStatus('Eroare: ' + e.message); }
@@ -359,6 +360,13 @@ async def handle_response(request: Request):
 # ---------------------------------------------------------------------------
 # STATUS CALLBACK — Twilio anunță când apelul s-a încheiat
 # ---------------------------------------------------------------------------
+
+@app.post("/voice/clear")
+async def clear_call():
+    global active_call_sid
+    active_call_sid = None
+    return Response(status_code=200)
+
 
 @app.post("/voice/status")
 async def call_status(request: Request):
