@@ -39,11 +39,6 @@ TWIML_APP_SID   = os.getenv("TWILIO_TWIML_APP_SID")
 # TOKEN — browserul îl folosește pentru a se conecta la Twilio Voice SDK
 # ---------------------------------------------------------------------------
 
-@app.get("/twilio-voice.js")
-async def serve_sdk():
-    return FileResponse("twilio-voice.js", media_type="application/javascript")
-
-
 @app.get("/token")
 async def get_token():
     token = AccessToken(
@@ -58,7 +53,10 @@ async def get_token():
         incoming_allow=True
     )
     token.add_grant(voice_grant)
-    return JSONResponse({"token": token.to_jwt()})
+    jwt = token.to_jwt()
+    if isinstance(jwt, bytes):
+        jwt = jwt.decode("utf-8")
+    return JSONResponse({"token": jwt})
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +89,7 @@ async def test_page():
 
     <div id="status">Se inițializează...</div>
 
-    <script src="/twilio-voice.js"></script>
+    <script src="https://media.twiliocdn.com/sdk/js/voice/releases/2.11.0/twilio.min.js"></script>
     <script>
         let device;
         let activeCall;
