@@ -132,6 +132,11 @@ async def get_logs():
     return JSONResponse(list(conversation_log))
 
 
+@app.get("/status")
+async def get_status():
+    return JSONResponse({"ocupat": active_call_sid is not None})
+
+
 # ---------------------------------------------------------------------------
 # PAGINA DE TEST
 # ---------------------------------------------------------------------------
@@ -151,6 +156,10 @@ async def test_page():
         #btn-call { background: #4CAF50; color: white; }
         #btn-hangup { background: #f44336; color: white; display: none; }
         #status { margin-top: 20px; padding: 15px; background: white; border-radius: 8px; color: #555; min-height: 50px; }
+        #linie { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; color: #555; }
+        #dot { width: 12px; height: 12px; border-radius: 50%; background: #4CAF50; }
+        #dot.ocupat { background: #f44336; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
         #jurnal { margin-top: 20px; text-align: left; }
         #jurnal h3 { text-align: center; color: #333; margin-bottom: 10px; }
         #log-list { list-style: none; padding: 0; margin: 0; }
@@ -164,6 +173,7 @@ async def test_page():
 <body>
     <h1>🎙️ Sistem Rezervări AI</h1>
     <p>Apasă butonul și vorbește cu AI-ul de rezervări</p>
+    <div id="linie"><span id="dot"></span><span id="linie-text">Linie liberă</span></div>
     <button id="btn-call" onclick="startCall()">📞 Sună</button>
     <button id="btn-hangup" onclick="hangup()">📵 Închide</button>
     <div id="status">Se inițializează...</div>
@@ -230,8 +240,26 @@ async def test_page():
             } catch(_) {}
         }
 
+        async function refreshStatus() {
+            try {
+                const res = await fetch('/status');
+                const data = await res.json();
+                const dot = document.getElementById('dot');
+                const txt = document.getElementById('linie-text');
+                if (data.ocupat) {
+                    dot.className = 'ocupat';
+                    txt.textContent = 'Linie ocupată — apel în curs';
+                } else {
+                    dot.className = '';
+                    txt.textContent = 'Linie liberă';
+                }
+            } catch(_) {}
+        }
+
         setup();
         setInterval(refreshLogs, 2000);
+        setInterval(refreshStatus, 3000);
+        refreshStatus();
     </script>
 </body>
 </html>
