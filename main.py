@@ -237,11 +237,11 @@ async def handle_inbound_call(request: Request):
     logger.info(f"[{call_sid}] Apel primit")
 
     url = await tts(
-        "Buna ziua! Ati sunat la sistemul nostru de rezervari. "
-        "Va rog sa imi spuneti ce doriti sa rezervati, "
-        "incluzand data, ora si numarul de persoane."
+        "Bună ziua! Ați sunat la sistemul nostru de rezervări. "
+        "Vă rog să îmi spuneți ce doriți să rezervați, "
+        "incluzând data, ora și numărul de persoane."
     )
-    url_fallback = await tts("Nu am detectat niciun raspuns. Va rugam sa sunati din nou. La revedere!")
+    url_fallback = await tts("Nu am detectat niciun răspuns. Vă rugăm să sunați din nou. La revedere!")
 
     response = VoiceResponse()
     gather = Gather(input="speech", action="/voice/process", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
@@ -269,7 +269,7 @@ async def process_speech(request: Request):
     response = VoiceResponse()
 
     if not speech_result:
-        url = await tts("Imi pare rau, nu am reusit sa va inteleg. Va rog sa repetati.")
+        url = await tts("Îmi pare rău, nu am reușit să vă înțeleg. Vă rog să repetați.")
         gather = Gather(input="speech", action="/voice/process", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
         gather.play(url)
         response.append(gather)
@@ -283,13 +283,13 @@ async def process_speech(request: Request):
         log_entry("ai", mesaj_confirmare, call_sid)
     except Exception as exc:
         logger.error(f"[{call_sid}] Eroare GPT: {exc}")
-        url = await tts("Am intampinat o problema tehnica. Va rog incercati din nou.")
+        url = await tts("Am întâmpinat o problemă tehnică. Vă rog încercați din nou.")
         response.play(url)
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
-    url_confirmare = await tts(f"{mesaj_confirmare} Este corect? Spuneti DA sau NU.")
-    url_timeout    = await tts("Nu am primit un raspuns. Va multumim! La revedere!")
+    url_confirmare = await tts(f"{mesaj_confirmare} Este corect? Spuneți DA sau NU.")
+    url_timeout    = await tts("Nu am primit un răspuns. Vă mulțumim! La revedere!")
 
     gather = Gather(input="speech", action="/voice/confirm", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
     gather.play(url_confirmare)
@@ -320,15 +320,15 @@ async def handle_confirmation(request: Request):
 
     if cuvinte_din_raspuns & cuvinte_da:
         logger.info(f"[{call_sid}] TEST REUSIT")
-        url = await tts("Excelent! Sistemul functioneaza corect. Va multumim! La revedere!")
+        url = await tts("Excelent! Sistemul funcționează corect. Vă mulțumim! La revedere!")
     elif cuvinte_din_raspuns & cuvinte_nu:
-        url = await tts("Inteleg, ma scuz. Sa reluam.")
+        url = await tts("Înțeleg, mă scuz. Să reluăm.")
         response.play(url)
         response.redirect("/voice/inbound", method="POST")
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
     else:
-        url = await tts("Va multumim pentru apel. La revedere!")
+        url = await tts("Vă mulțumim pentru apel. La revedere!")
 
     response.play(url)
     response.hangup()
@@ -346,10 +346,10 @@ async def extrage_detalii_rezervare(text_utilizator: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "Esti un asistent vocal de rezervari. "
-                    "Din mesajul utilizatorului extrage: tipul rezervarii, data, ora si numarul de persoane. "
-                    "Formuleaza UN SINGUR mesaj de confirmare in romana, natural si concis. "
-                    "Raspunde EXCLUSIV cu mesajul de confirmare."
+                    "Ești un asistent vocal de rezervări. "
+                    "Din mesajul utilizatorului extrage: tipul rezervării, data, ora și numărul de persoane. "
+                    "Formulează UN SINGUR mesaj de confirmare în română, natural și concis, cu diacritice corecte. "
+                    "Răspunde EXCLUSIV cu mesajul de confirmare."
                 ),
             },
             {"role": "user", "content": text_utilizator},
