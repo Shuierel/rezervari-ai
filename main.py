@@ -5,6 +5,9 @@ Suportă atât apeluri telefonice cât și apeluri din browser (Voice SDK)
 """
 
 import os
+import io
+import uuid
+import asyncio
 import logging
 from collections import deque
 from datetime import datetime
@@ -14,6 +17,7 @@ from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.jwt.access_token import AccessToken
 from twilio.jwt.access_token.grants import VoiceGrant
 from openai import AsyncOpenAI
+from gtts import gTTS
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,15 +32,18 @@ app = FastAPI(title="Sistem Rezervări AI", version="1.0.0")
 
 openai_client = AsyncOpenAI()
 
-VOICE = "Polly.Carmen"
 LANGUAGE = "ro-RO"
+BASE_URL = os.getenv("BASE_URL", "https://rezervari-ai.onrender.com")
 
 ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
 API_KEY_SID     = os.getenv("TWILIO_API_KEY_SID")
 API_KEY_SECRET  = os.getenv("TWILIO_API_KEY_SECRET")
 TWIML_APP_SID   = os.getenv("TWILIO_TWIML_APP_SID")
 
-# Jurnal conversații (maxim 50 intrări în memorie)
+# Cache audio în memorie
+audio_cache: dict = {}
+
+# Jurnal conversații
 conversation_log: deque = deque(maxlen=50)
 
 
@@ -49,8 +56,35 @@ def log_entry(tip: str, text: str, call_sid: str = ""):
     })
 
 
+async def tts(text: str) -> str:
+    """Generează audio cu gTTS și returnează URL-ul de accesat."""
+    audio_id = str(uuid.uuid4())
+    loop = asyncio.get_event_loop()
+
+    def generate():
+        tts_obj = gTTS(text=text, lang="ro")
+        buf = io.BytesIO()
+        tts_obj.write_to_fp(buf)
+        return buf.getvalue()
+
+    audio_cache[audio_id] = await loop.run_in_executor(None, generate)
+    return f"{BASE_URL}/audio/{audio_id}"
+
+
 # ---------------------------------------------------------------------------
-# TOKEN — browserul îl folosește pentru a se conecta la Twilio Voice SDK
+# AUDIO — servim fișierele MP3 generate
+# ---------------------------------------------------------------------------
+
+@app.get("/audio/{audio_id}")
+async def serve_audio(audio_id: str):
+    data = audio_cache.get(audio_id)
+    if not data:
+        return Response(status_code=404)
+    return Response(content=data, media_type="audio/mpeg")
+
+
+# ---------------------------------------------------------------------------
+# TOKEN
 # ---------------------------------------------------------------------------
 
 @app.get("/token")
@@ -74,7 +108,7 @@ async def get_token():
 
 
 # ---------------------------------------------------------------------------
-# LOGS — returnează jurnalul conversației
+# LOGS
 # ---------------------------------------------------------------------------
 
 @app.get("/logs")
@@ -83,7 +117,7 @@ async def get_logs():
 
 
 # ---------------------------------------------------------------------------
-# PAGINA DE TEST — interfață browser pentru a testa fără telefon
+# PAGINA DE TEST
 # ---------------------------------------------------------------------------
 
 @app.get("/test", response_class=HTMLResponse)
@@ -128,34 +162,23 @@ async def test_page():
 
     <script src="https://unpkg.com/@twilio/voice-sdk@2.11.0/dist/twilio.min.js"></script>
     <script>
-        let device;
-        let activeCall;
-        let lastLogCount = 0;
+        let device, activeCall, lastLogCount = 0;
 
         async function setup() {
             try {
                 const res = await fetch('/token');
                 const data = await res.json();
-
-                device = new Twilio.Device(data.token, {
-                    codecPreferences: ['opus', 'pcmu'],
-                    logLevel: 'warn'
-                });
-
+                device = new Twilio.Device(data.token, { codecPreferences: ['opus', 'pcmu'], logLevel: 'warn' });
                 device.on('registered', () => setStatus('Gata — apasă Sună pentru a testa'));
                 device.on('error', (err) => setStatus('Eroare: ' + err.message));
-
                 await device.register();
-            } catch(e) {
-                setStatus('Eroare la inițializare: ' + e.message);
-            }
+            } catch(e) { setStatus('Eroare la inițializare: ' + e.message); }
         }
 
         async function startCall() {
             try {
                 setStatus('Se conectează...');
                 activeCall = await device.connect();
-
                 activeCall.on('accept', () => {
                     setStatus('Apel conectat — vorbește cu AI-ul...');
                     document.getElementById('btn-call').style.display = 'none';
@@ -168,18 +191,11 @@ async def test_page():
                     activeCall = null;
                 });
                 activeCall.on('error', (err) => setStatus('Eroare apel: ' + err.message));
-            } catch(e) {
-                setStatus('Eroare: ' + e.message);
-            }
+            } catch(e) { setStatus('Eroare: ' + e.message); }
         }
 
-        function hangup() {
-            if (activeCall) activeCall.disconnect();
-        }
-
-        function setStatus(msg) {
-            document.getElementById('status').innerText = msg;
-        }
+        function hangup() { if (activeCall) activeCall.disconnect(); }
+        function setStatus(msg) { document.getElementById('status').innerText = msg; }
 
         async function refreshLogs() {
             try {
@@ -187,13 +203,11 @@ async def test_page():
                 const entries = await res.json();
                 if (entries.length === lastLogCount) return;
                 lastLogCount = entries.length;
-
                 const ul = document.getElementById('log-list');
                 ul.innerHTML = '';
                 entries.forEach(e => {
                     const li = document.createElement('li');
-                    let cls = 'tip-user';
-                    let label = '🎤 Tu';
+                    let cls = 'tip-user', label = '🎤 Tu';
                     if (e.tip === 'ai') { cls = 'tip-ai'; label = '🤖 AI'; }
                     if (e.tip === 'confirmare') { cls = 'tip-confirmare'; label = '✅ Confirmare'; }
                     li.className = cls;
@@ -222,24 +236,18 @@ async def handle_inbound_call(request: Request):
     call_sid = form.get("CallSid", "necunoscut")
     logger.info(f"[{call_sid}] Apel primit")
 
-    response = VoiceResponse()
-    gather = Gather(
-        input="speech",
-        action="/voice/process",
-        method="POST",
-        timeout=15,
-        speech_timeout="3",
-        language=LANGUAGE,
-    )
-    gather.say(
+    url = await tts(
         "Buna ziua! Ati sunat la sistemul nostru de rezervari. "
         "Va rog sa imi spuneti ce doriti sa rezervati, "
-        "incluzand data, ora si numarul de persoane.",
-        voice=VOICE,
-        language=LANGUAGE,
+        "incluzand data, ora si numarul de persoane."
     )
+    url_fallback = await tts("Nu am detectat niciun raspuns. Va rugam sa sunati din nou. La revedere!")
+
+    response = VoiceResponse()
+    gather = Gather(input="speech", action="/voice/process", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
+    gather.play(url)
     response.append(gather)
-    response.say("Nu am detectat niciun raspuns. Va rugam sa sunati din nou. La revedere!", voice=VOICE, language=LANGUAGE)
+    response.play(url_fallback)
     response.hangup()
 
     return Response(content=str(response), media_type="application/xml")
@@ -261,8 +269,9 @@ async def process_speech(request: Request):
     response = VoiceResponse()
 
     if not speech_result:
+        url = await tts("Imi pare rau, nu am reusit sa va inteleg. Va rog sa repetati.")
         gather = Gather(input="speech", action="/voice/process", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
-        gather.say("Imi pare rau, nu am reusit sa va inteleg. Va rog sa repetati.", voice=VOICE, language=LANGUAGE)
+        gather.play(url)
         response.append(gather)
         return Response(content=str(response), media_type="application/xml")
 
@@ -274,17 +283,18 @@ async def process_speech(request: Request):
         log_entry("ai", mesaj_confirmare, call_sid)
     except Exception as exc:
         logger.error(f"[{call_sid}] Eroare GPT: {exc}")
-        response.say("Am intampinat o problema tehnica. Va rog incercati din nou.", voice=VOICE, language=LANGUAGE)
+        url = await tts("Am intampinat o problema tehnica. Va rog incercati din nou.")
+        response.play(url)
         response.hangup()
         return Response(content=str(response), media_type="application/xml")
 
+    url_confirmare = await tts(f"{mesaj_confirmare} Este corect? Spuneti DA sau NU.")
+    url_timeout    = await tts("Nu am primit un raspuns. Va multumim! La revedere!")
+
     gather = Gather(input="speech", action="/voice/confirm", method="POST", timeout=15, speech_timeout="3", language=LANGUAGE)
-    gather.say(
-        f"Doar ca sa imi testez sistemele: {mesaj_confirmare} Este corect? Spuneti DA sau NU.",
-        voice=VOICE, language=LANGUAGE,
-    )
+    gather.play(url_confirmare)
     response.append(gather)
-    response.say("Nu am primit un raspuns. Va multumim! La revedere!", voice=VOICE, language=LANGUAGE)
+    response.play(url_timeout)
     response.hangup()
 
     return Response(content=str(response), media_type="application/xml")
@@ -310,13 +320,17 @@ async def handle_confirmation(request: Request):
 
     if cuvinte_din_raspuns & cuvinte_da:
         logger.info(f"[{call_sid}] TEST REUSIT")
-        response.say("Excelent! Sistemul functioneaza corect. Va multumim! La revedere!", voice=VOICE, language=LANGUAGE)
+        url = await tts("Excelent! Sistemul functioneaza corect. Va multumim! La revedere!")
     elif cuvinte_din_raspuns & cuvinte_nu:
-        response.say("Inteleg, ma scuz. Sa reluam.", voice=VOICE, language=LANGUAGE)
+        url = await tts("Inteleg, ma scuz. Sa reluam.")
+        response.play(url)
         response.redirect("/voice/inbound", method="POST")
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
     else:
-        response.say("Va multumim pentru apel. La revedere!", voice=VOICE, language=LANGUAGE)
+        url = await tts("Va multumim pentru apel. La revedere!")
 
+    response.play(url)
     response.hangup()
     return Response(content=str(response), media_type="application/xml")
 
