@@ -26,7 +26,7 @@ app = FastAPI(title="Sistem Rezervări AI", version="1.0.0")
 
 openai_client = AsyncOpenAI()
 
-VOICE = "Polly.Carmen"
+VOICE = "Polly.Carmen-Neural"
 LANGUAGE = "ro-RO"
 
 ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
