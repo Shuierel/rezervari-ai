@@ -37,6 +37,7 @@ TWIML_APP_SID  = os.getenv("TWILIO_TWIML_APP_SID")
 audio_cache:    dict  = {}
 conversations:  dict  = {}  # call_sid -> istoric mesaje GPT
 conversation_log: deque = deque(maxlen=50)
+active_call_sid: str | None = None  # un singur apel simultan
 
 SYSTEM_PROMPT = """Ești un asistent vocal de rezervări. Tu gestionezi întreaga conversație cu clientul.
 
@@ -243,10 +244,20 @@ async def test_page():
 
 @app.post("/voice/inbound")
 async def handle_inbound_call(request: Request):
+    global active_call_sid
     form     = await request.form()
     call_sid = form.get("CallSid", "necunoscut")
     logger.info(f"[{call_sid}] Apel primit")
 
+    if active_call_sid and active_call_sid != call_sid:
+        logger.info(f"[{call_sid}] Respins — linie ocupată")
+        url = await tts("Îmi pare rău, linia este ocupată momentan. Vă rugăm să sunați din nou în câteva minute.")
+        response = VoiceResponse()
+        response.play(url)
+        response.hangup()
+        return Response(content=str(response), media_type="application/xml")
+
+    active_call_sid = call_sid
     conversation_log.clear()
     conversations[call_sid] = []
 
@@ -304,6 +315,7 @@ async def handle_response(request: Request):
     response.play(url)
 
     if incheiat:
+        active_call_sid = None
         response.hangup()
     else:
         gather = Gather(input="speech", action="/voice/respond", method="POST",
@@ -314,6 +326,23 @@ async def handle_response(request: Request):
         response.hangup()
 
     return Response(content=str(response), media_type="application/xml")
+
+
+# ---------------------------------------------------------------------------
+# STATUS CALLBACK — Twilio anunță când apelul s-a încheiat
+# ---------------------------------------------------------------------------
+
+@app.post("/voice/status")
+async def call_status(request: Request):
+    global active_call_sid
+    form     = await request.form()
+    call_sid = form.get("CallSid", "")
+    status   = form.get("CallStatus", "")
+    logger.info(f"[{call_sid}] Status: {status}")
+    if status in ("completed", "failed", "busy", "no-answer", "canceled"):
+        if active_call_sid == call_sid:
+            active_call_sid = None
+    return Response(status_code=200)
 
 
 # ---------------------------------------------------------------------------
